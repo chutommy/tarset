@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
+use crate::LUSTRE_OPTIMAL_BUFFER;
 use crate::TarFormat;
 use crate::sample::{Field, Sample};
 
@@ -27,9 +28,6 @@ fn split_key_suffix(path: &[u8]) -> Option<(&[u8], &[u8])> {
         Some((key, suffix))
     }
 }
-
-// Lustre file system (and many others) perform best with large sequential reads.
-const LUSTRE_OPTIMAL_BUFFER: usize = 1024 * 1024 * 16;
 
 /// Open a tar archive with decompression based on [`TarFormat`].
 fn open_tar(path: &Path) -> Result<tar::Archive<Box<dyn Read>>> {
