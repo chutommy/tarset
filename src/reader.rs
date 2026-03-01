@@ -30,7 +30,9 @@ fn split_key_suffix(path: &[u8]) -> Option<(&[u8], &[u8])> {
 }
 
 /// Open a tar archive with decompression based on [`TarFormat`].
-fn open_tar(path: &Path) -> Result<tar::Archive<Box<dyn Read>>> {
+///
+/// See [`SampleWriter`](crate::writer::SampleWriter) for the corresponding writer.
+fn open_tar_file(path: &Path) -> Result<Box<dyn Read>> {
     let file = File::open(path)
         .with_context(|| format!("Failed to open archive at: {}", path.display()))?;
     advise_sequential(&file);
@@ -58,7 +60,7 @@ fn open_tar(path: &Path) -> Result<tar::Archive<Box<dyn Read>>> {
         }
     };
 
-    Ok(tar::Archive::new(reader))
+    Ok(reader)
 }
 
 /// Hint the OS to prefetch aggressively for sequential access.
@@ -83,7 +85,7 @@ pub struct SampleReader {
 impl SampleReader {
     pub fn open(path: &Path) -> Result<Self> {
         let url: Arc<str> = Arc::from(path.display().to_string().as_str());
-        let archive = Box::new(open_tar(path)?);
+        let archive = Box::new(tar::Archive::new(open_tar_file(path)?));
 
         // SAFETY: archive is heap-pinned and outlives entries via _archive field.
         let archive_ptr = Box::into_raw(archive);
@@ -103,9 +105,8 @@ impl SampleReader {
     }
 
     /// Filter entries by suffix. Only matching entries will have their data read.
-    pub fn with_suffixes(mut self, suffixes: impl IntoIterator<Item = String>) -> Self {
+    pub fn set_suffixes(&mut self, suffixes: impl IntoIterator<Item = String>) {
         self.suffixes = Some(suffixes.into_iter().collect());
-        self
     }
 
     fn wants_suffix(&self, suffix: &[u8]) -> bool {
@@ -121,7 +122,7 @@ impl SampleReader {
         }
     }
 
-    /// Extract ad build a Sample from the current accumulation.
+    /// Extract and build a Sample from the current accumulation.
     fn take_sample(&mut self) -> Sample {
         let key = String::from_utf8_lossy(&self.current_key).into_owned();
         Sample {

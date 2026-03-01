@@ -34,8 +34,9 @@ fn main() {
                 continue;
             }
         };
+        // let reader = reader.with_suffixes(vec!["png".to_string()]);
 
-        let dest = Path::new("./data/dest/output.tar.gz");
+        let dest = Path::new("./data/dest/output.tar");
         let mut writer = match SampleWriter::create(dest) {
             Ok(w) => w,
             Err(e) => {
@@ -43,8 +44,6 @@ fn main() {
                 continue;
             }
         };
-
-        // let reader = reader.with_suffixes(vec!["png".to_string()]);
 
         for sample in reader {
             match sample {
@@ -58,6 +57,10 @@ fn main() {
                 }
                 Err(e) => eprintln!("Error reading sample: {e:#}"),
             }
+        }
+
+        if let Err(e) = writer.finish() {
+            eprintln!("Error finalizing {}: {e:#}", dest.display());
         }
     }
 }
