@@ -1,112 +1,249 @@
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufReader, Read};
-use std::path::{Path, PathBuf};
+use std::os::unix::io::AsRawFd;
+use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
-pub type Sample = HashMap<String, Vec<u8>>;
+use crate::TarFormat;
 
-fn split_key_suffix(path: &str) -> Option<(&str, &str)> {
-    let (key, suffix) = path.split_once('.')?;
+/// Split a tar entry path into (key, suffix) operating on raw bytes.
+/// Splits at the first `.` in the basename (after last `/`).
+///
+/// Examples:
+/// `/a/b/c/000042.cls.txt` -> `( "/a/b/c/000042", "cls.txt" )`
+/// ` d/e/f/000042.img.jpg` -> `( "d/e/f/000042" , "img.jpg" )`
+/// ` ./g/h/000042.webp`    -> `( "./g/h/000042" , "webp"    )`
+fn split_key_suffix(path: &[u8]) -> Option<(&[u8], &[u8])> {
+    let basename_start = path.iter().rposition(|&b| b == b'/').map_or(0, |i| i + 1);
+    let dot = memchr::memchr(b'.', &path[basename_start..])? + basename_start;
+    let key = &path[..dot];
+    let suffix = &path[dot + 1..];
     if key.is_empty() || suffix.is_empty() {
-        return None;
+        None
+    } else {
+        Some((key, suffix))
     }
-    Some((key, suffix))
 }
 
-fn open_tar(path: &Path) -> Result<tar::Archive<Box<dyn Read>>> {
-    let file = File::open(path).with_context(|| path.display().to_string())?;
-    let buf = BufReader::new(file);
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+// Lustre file system (and many others) perform best with large sequential reads.
+const LUSTRE_OPTIMAL_BUFFER: usize = 1024 * 1024 * 16;
 
-    let reader: Box<dyn Read> = if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
-        Box::new(flate2::read::GzDecoder::new(buf))
-    } else if name.ends_with(".tar.bz2") {
-        Box::new(bzip2::read::BzDecoder::new(buf))
-    } else if name.ends_with(".tar.xz") {
-        Box::new(xz2::read::XzDecoder::new(buf))
-    } else if name.ends_with(".tar.zst") {
-        Box::new(zstd::stream::Decoder::new(buf)?)
-    } else {
-        Box::new(buf)
+/// A single field within a sample: a suffix and its data.
+pub struct Field {
+    pub suffix: String,
+    pub data: Vec<u8>,
+}
+
+/// A single sample from a tar archive.
+pub struct Sample {
+    pub key: String,
+    pub url: Arc<str>,
+    pub fields: Vec<Field>,
+}
+
+/// Open a tar archive with decompression based on [`TarFormat`].
+/// For compressed formats, wraps the decompressor in a BufReader so the tar
+/// crate's small reads are served from buffer.
+fn open_tar(path: &Path) -> Result<tar::Archive<Box<dyn Read>>> {
+    let file = File::open(path)
+        .with_context(|| format!("Failed to open archive at: {}", path.display()))?;
+    advise_sequential(&file);
+    let buf = BufReader::with_capacity(LUSTRE_OPTIMAL_BUFFER, file);
+    let format = TarFormat::from_path(path).unwrap_or(TarFormat::Tar);
+
+    let reader: Box<dyn Read> = match format {
+        TarFormat::Tar => Box::new(buf),
+        TarFormat::TarGz | TarFormat::Tgz => Box::new(BufReader::with_capacity(
+            LUSTRE_OPTIMAL_BUFFER,
+            flate2::read::GzDecoder::new(buf),
+        )),
+        TarFormat::TarBz2 => Box::new(BufReader::with_capacity(
+            LUSTRE_OPTIMAL_BUFFER,
+            bzip2::read::BzDecoder::new(buf),
+        )),
+        TarFormat::TarXz => Box::new(BufReader::with_capacity(
+            LUSTRE_OPTIMAL_BUFFER,
+            xz2::read::XzDecoder::new(buf),
+        )),
+        TarFormat::TarZst => {
+            let mut decoder = zstd::stream::Decoder::new(buf)?;
+            decoder.window_log_max(31)?;
+            Box::new(BufReader::with_capacity(LUSTRE_OPTIMAL_BUFFER, decoder))
+        }
     };
 
     Ok(tar::Archive::new(reader))
 }
 
-/// Iterate over samples in a single tar file.
-///
-/// Consecutive entries sharing the same key (prefix before first dot) are
-/// grouped into one [`Sample`]. Each sample contains:
-/// - `__key__` — the sample key (e.g. `"000042"`)
-/// - `__url__` — the tar file path
-/// - one entry per suffix (e.g. `".jpg"` → raw bytes)
-pub fn read_samples(path: &Path) -> Result<Vec<Sample>> {
-    let url = path.display().to_string().into_bytes();
-    let mut archive = open_tar(path)?;
-
-    let mut samples: Vec<Sample> = Vec::new();
-    let mut current_key: Option<String> = None;
-    let mut current_sample = Sample::new();
-
-    for entry in archive
-        .entries()
-        .with_context(|| path.display().to_string())?
-    {
-        let mut entry = entry.with_context(|| format!("reading entry in {}", path.display()))?;
-
-        let entry_path = entry
-            .path()
-            .with_context(|| format!("entry path in {}", path.display()))?
-            .to_string_lossy()
-            .into_owned();
-
-        // Skip directories
-        if entry.header().entry_type().is_dir() {
-            continue;
-        }
-
-        let (key, suffix) = match split_key_suffix(&entry_path) {
-            Some(pair) => pair,
-            None => continue,
-        };
-
-        // Key changed — flush the current sample
-        if current_key.as_deref() != Some(key) {
-            if current_key.is_some() {
-                samples.push(current_sample);
-                current_sample = Sample::new();
-            }
-            current_key = Some(key.to_owned());
-            current_sample.insert("__key__".to_owned(), key.as_bytes().to_vec());
-            current_sample.insert("__url__".to_owned(), url.clone());
-        }
-
-        let mut data = Vec::new();
-        entry
-            .read_to_end(&mut data)
-            .with_context(|| format!("{entry_path} in {}", path.display()))?;
-        current_sample.insert(suffix.to_owned(), data);
+/// Hint the OS to prefetch aggressively for sequential access.
+fn advise_sequential(file: &File) {
+    unsafe {
+        libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
     }
-
-    // Flush last sample
-    if current_key.is_some() {
-        samples.push(current_sample);
-    }
-
-    Ok(samples)
 }
 
-/// Read samples from multiple tar files in parallel.
-pub fn read_samples_multi(paths: &[PathBuf]) -> Result<Vec<Sample>> {
-    use rayon::prelude::*;
+/// Streaming iterator over [`Sample`]s in a tar archive.
+pub struct SampleReader {
+    entries: tar::Entries<'static, Box<dyn Read>>,
+    _archive: Box<tar::Archive<Box<dyn Read>>>,
+    url: Arc<str>,
+    current_key: Vec<u8>,
+    current_sample: Vec<Field>,
+    suffixes: Option<HashSet<String>>,
+    done: bool,
+}
 
-    let per_file: Vec<Result<Vec<Sample>>> = paths.par_iter().map(|p| read_samples(p)).collect();
+impl SampleReader {
+    pub fn open(path: &Path) -> Result<Self> {
+        let url: Arc<str> = Arc::from(path.display().to_string().as_str());
+        let archive = Box::new(open_tar(path)?);
 
-    let mut all = Vec::new();
-    for result in per_file {
-        all.extend(result?);
+        let archive_ptr = Box::into_raw(archive);
+        let entries = unsafe { (*archive_ptr).entries()? };
+        let entries = unsafe { std::mem::transmute(entries) };
+        let archive = unsafe { Box::from_raw(archive_ptr) };
+
+        Ok(Self {
+            entries,
+            _archive: archive,
+            url,
+            current_key: Vec::new(),
+            current_sample: Vec::new(),
+            suffixes: None,
+            done: false,
+        })
     }
-    Ok(all)
+
+    /// Only read entries whose suffix is in `suffixes`.
+    pub fn with_suffixes(mut self, suffixes: impl IntoIterator<Item = String>) -> Self {
+        self.suffixes = Some(suffixes.into_iter().collect());
+        self
+    }
+
+    fn wants_suffix(&self, suffix: &[u8]) -> bool {
+        match &self.suffixes {
+            None => true,
+            Some(set) => {
+                if let Ok(s) = std::str::from_utf8(suffix) {
+                    set.contains(s)
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Build a finished Sample from the current accumulation, moving data out.
+    fn take_sample(&mut self) -> Sample {
+        let key = String::from_utf8_lossy(&self.current_key).into_owned();
+        Sample {
+            key,
+            url: Arc::clone(&self.url),
+            fields: std::mem::take(&mut self.current_sample),
+        }
+    }
+}
+
+impl Iterator for SampleReader {
+    type Item = Result<Sample>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+
+        loop {
+            let entry = match self.entries.next() {
+                Some(Ok(e)) => e,
+                Some(Err(e)) => return Some(Err(e.into())),
+                None => {
+                    self.done = true;
+                    if !self.current_sample.is_empty() {
+                        return Some(Ok(self.take_sample()));
+                    }
+                    return None;
+                }
+            };
+
+            if entry.header().entry_type().is_dir() {
+                continue;
+            }
+
+            let size = entry.size() as usize;
+
+            // Analyze path while borrowing entry, extract only the decisions.
+            let analysis = {
+                let path_bytes = entry.path_bytes();
+                let (key, suffix) = match split_key_suffix(&path_bytes) {
+                    Some(pair) => pair,
+                    None => {
+                        let path_display = String::from_utf8_lossy(&path_bytes);
+                        return Some(Err(anyhow::anyhow!(
+                            "Invalid entry path (missing key or suffix): {path_display}"
+                        )));
+                    }
+                };
+
+                let key_changed = self.current_key != key;
+                let want = self.wants_suffix(suffix);
+
+                if key_changed {
+                    self.current_key.clear();
+                    self.current_key.extend_from_slice(key);
+                }
+
+                // Only allocate suffix string when we'll actually use it
+                let suffix_str = if want {
+                    Some(String::from_utf8_lossy(suffix).into_owned())
+                } else {
+                    None
+                };
+
+                (key_changed, suffix_str)
+            }; // path_bytes borrow dropped here
+
+            let (key_changed, suffix_str) = analysis;
+
+            if key_changed {
+                let prev_sample = if !self.current_sample.is_empty() {
+                    Some(self.take_sample())
+                } else {
+                    None
+                };
+
+                if let Some(suffix_str) = suffix_str {
+                    let mut data = Vec::with_capacity(size + 64);
+                    let mut entry = entry;
+                    if let Err(e) = entry.read_to_end(&mut data) {
+                        return Some(Err(e.into()));
+                    }
+                    self.current_sample.push(Field {
+                        suffix: suffix_str,
+                        data,
+                    });
+                }
+
+                if let Some(sample) = prev_sample {
+                    return Some(Ok(sample));
+                }
+                continue;
+            }
+
+            // Same key, accumulate fields
+            if let Some(suffix_str) = suffix_str {
+                let mut data = Vec::with_capacity(size + 64);
+                let mut entry = entry;
+                if let Err(e) = entry.read_to_end(&mut data) {
+                    return Some(Err(e.into()));
+                }
+                self.current_sample.push(Field {
+                    suffix: suffix_str,
+                    data,
+                });
+            }
+        }
+    }
 }

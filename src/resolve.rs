@@ -18,9 +18,7 @@ fn is_hidden(entry: &DirEntry) -> bool {
 }
 
 fn is_tarfile(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|name| TarFormat::from_filename(name).is_some())
+    TarFormat::from_path(path).is_some()
 }
 
 fn is_glob(s: &str) -> bool {
@@ -33,8 +31,9 @@ fn make_absolute(path: &Path) -> Result<PathBuf> {
 
 /// Recursively walks a directory, collecting tar files while skipping hidden entries.
 fn resolve_dir(path: &Path) -> Result<Vec<PathBuf>> {
+    let abs = make_absolute(path)?;
     let mut results = Vec::new();
-    for entry in WalkDir::new(path)
+    for entry in WalkDir::new(&abs)
         .into_iter()
         .filter_entry(|e| !is_hidden(e))
     {
@@ -87,7 +86,7 @@ const PAR_THRESHOLD: usize = 4;
 
 /// Resolves multiple source strings into deduplicated, sorted absolute paths.
 /// Falls back to sequential resolution when the number of sources is small.
-pub fn resolve_sources(sources: &[String]) -> Result<Vec<PathBuf>> {
+pub fn resolve_sources(sources: &[&str]) -> Result<Vec<PathBuf>> {
     let mut resolved: Vec<PathBuf> = Vec::new();
 
     if sources.len() >= PAR_THRESHOLD {
