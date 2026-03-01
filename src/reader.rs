@@ -8,14 +8,14 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use crate::TarFormat;
+use crate::sample::{Field, Sample};
 
-/// Split a tar entry path into (key, suffix) operating on raw bytes.
-/// Splits at the first `.` in the basename (after last `/`).
+/// Split a tar entry path into `(key, suffix)` at the first `.` in the basename.
 ///
-/// Examples:
-/// `/a/b/c/000042.cls.txt` -> `( "/a/b/c/000042", "cls.txt" )`
-/// ` d/e/f/000042.img.jpg` -> `( "d/e/f/000042" , "img.jpg" )`
-/// ` ./g/h/000042.webp`    -> `( "./g/h/000042" , "webp"    )`
+/// ```text
+/// /a/b/000042.cls.txt -> ("/a/b/000042", "cls.txt")
+/// ./g/h/000042.webp   -> ("./g/h/000042", "webp")
+/// ```
 fn split_key_suffix(path: &[u8]) -> Option<(&[u8], &[u8])> {
     let basename_start = path.iter().rposition(|&b| b == b'/').map_or(0, |i| i + 1);
     let dot = memchr::memchr(b'.', &path[basename_start..])? + basename_start;
@@ -31,22 +31,7 @@ fn split_key_suffix(path: &[u8]) -> Option<(&[u8], &[u8])> {
 // Lustre file system (and many others) perform best with large sequential reads.
 const LUSTRE_OPTIMAL_BUFFER: usize = 1024 * 1024 * 16;
 
-/// A single field within a sample: a suffix and its data.
-pub struct Field {
-    pub suffix: String,
-    pub data: Vec<u8>,
-}
-
-/// A single sample from a tar archive.
-pub struct Sample {
-    pub key: String,
-    pub url: Arc<str>,
-    pub fields: Vec<Field>,
-}
-
 /// Open a tar archive with decompression based on [`TarFormat`].
-/// For compressed formats, wraps the decompressor in a BufReader so the tar
-/// crate's small reads are served from buffer.
 fn open_tar(path: &Path) -> Result<tar::Archive<Box<dyn Read>>> {
     let file = File::open(path)
         .with_context(|| format!("Failed to open archive at: {}", path.display()))?;
@@ -85,7 +70,8 @@ fn advise_sequential(file: &File) {
     }
 }
 
-/// Streaming iterator over [`Sample`]s in a tar archive.
+/// Streaming iterator that yields [`Sample`]s from a tar archive.
+/// Consecutive tar entries sharing the same key are grouped into a single sample.
 pub struct SampleReader {
     entries: tar::Entries<'static, Box<dyn Read>>,
     _archive: Box<tar::Archive<Box<dyn Read>>>,
@@ -101,6 +87,7 @@ impl SampleReader {
         let url: Arc<str> = Arc::from(path.display().to_string().as_str());
         let archive = Box::new(open_tar(path)?);
 
+        // SAFETY: archive is heap-pinned and outlives entries via _archive field.
         let archive_ptr = Box::into_raw(archive);
         let entries = unsafe { (*archive_ptr).entries()? };
         let entries = unsafe { std::mem::transmute(entries) };
@@ -117,7 +104,7 @@ impl SampleReader {
         })
     }
 
-    /// Only read entries whose suffix is in `suffixes`.
+    /// Filter entries by suffix. Only matching entries will have their data read.
     pub fn with_suffixes(mut self, suffixes: impl IntoIterator<Item = String>) -> Self {
         self.suffixes = Some(suffixes.into_iter().collect());
         self
@@ -136,7 +123,7 @@ impl SampleReader {
         }
     }
 
-    /// Build a finished Sample from the current accumulation, moving data out.
+    /// Extract ad build a Sample from the current accumulation.
     fn take_sample(&mut self) -> Sample {
         let key = String::from_utf8_lossy(&self.current_key).into_owned();
         Sample {
@@ -174,7 +161,7 @@ impl Iterator for SampleReader {
 
             let size = entry.size() as usize;
 
-            // Analyze path while borrowing entry, extract only the decisions.
+            // Parse path and decide what to do before consuming the entry.
             let analysis = {
                 let path_bytes = entry.path_bytes();
                 let (key, suffix) = match split_key_suffix(&path_bytes) {
@@ -195,7 +182,6 @@ impl Iterator for SampleReader {
                     self.current_key.extend_from_slice(key);
                 }
 
-                // Only allocate suffix string when we'll actually use it
                 let suffix_str = if want {
                     Some(String::from_utf8_lossy(suffix).into_owned())
                 } else {
@@ -203,7 +189,7 @@ impl Iterator for SampleReader {
                 };
 
                 (key_changed, suffix_str)
-            }; // path_bytes borrow dropped here
+            };
 
             let (key_changed, suffix_str) = analysis;
 
@@ -232,7 +218,6 @@ impl Iterator for SampleReader {
                 continue;
             }
 
-            // Same key, accumulate fields
             if let Some(suffix_str) = suffix_str {
                 let mut data = Vec::with_capacity(size + 64);
                 let mut entry = entry;
