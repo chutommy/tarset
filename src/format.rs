@@ -31,8 +31,8 @@ impl TarFormat {
         }
     }
 
-    pub fn from_filename<P: AsRef<Path>>(path: P) -> Option<TarFormat> {
-        let name = path.as_ref().to_str()?;
+    pub fn from_path(path: &Path) -> Option<TarFormat> {
+        let name = path.file_name()?.to_str()?;
         Self::ALL
             .iter()
             .find(|fmt| name.ends_with(fmt.extension()))
