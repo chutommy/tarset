@@ -4,11 +4,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+use crate::LUSTRE_OPTIMAL_BUFFER;
 use crate::TarFormat;
 use crate::sample::Sample;
-
-// Lustre file system (and many others) perform best with large sequential reads.
-const LUSTRE_OPTIMAL_BUFFER: usize = 1024 * 1024 * 16;
 
 /// Writes [`Sample`]s into a tar archive, the inverse of
 /// [`SampleReader`](crate::reader::SampleReader).
