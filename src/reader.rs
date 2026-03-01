@@ -177,21 +177,22 @@ impl Iterator for SampleReader {
                 let key_changed = self.current_key != key;
                 let want = self.wants_suffix(suffix);
 
-                if key_changed {
-                    self.current_key.clear();
-                    self.current_key.extend_from_slice(key);
-                }
-
                 let suffix_str = if want {
                     Some(String::from_utf8_lossy(suffix).into_owned())
                 } else {
                     None
                 };
 
-                (key_changed, suffix_str)
+                let key_owned = if key_changed {
+                    Some(key.to_vec())
+                } else {
+                    None
+                };
+
+                (key_changed, suffix_str, key_owned)
             };
 
-            let (key_changed, suffix_str) = analysis;
+            let (key_changed, suffix_str, new_key) = analysis;
 
             if key_changed {
                 let prev_sample = if !self.current_sample.is_empty() {
@@ -199,6 +200,8 @@ impl Iterator for SampleReader {
                 } else {
                     None
                 };
+
+                self.current_key = new_key.unwrap();
 
                 if let Some(suffix_str) = suffix_str {
                     let mut data = Vec::with_capacity(size + 64);

@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use crate::TarFormat;
 use crate::sample::Sample;
 
-/// 16 MB — matches the reader's buffer size for consistent I/O throughput.
+// Lustre file system (and many others) perform best with large sequential reads.
 const LUSTRE_OPTIMAL_BUFFER: usize = 1024 * 1024 * 16;
 
 /// Writes [`Sample`]s into a tar archive, the inverse of
