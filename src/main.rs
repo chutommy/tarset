@@ -1,5 +1,5 @@
-use mortar::reader::SampleReader;
-use mortar::resolve;
+use tapeset::reader::SampleReader;
+use tapeset::resolve;
 
 fn main() {
     // let sources = vec![
