@@ -1,0 +1,10 @@
+[package]
+name = "mortar"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+glob = "0.3"
+rayon = "1"
+walkdir = "2.5"
