@@ -44,7 +44,9 @@ fn split_key_suffix(path: &[u8]) -> Option<(&[u8], &[u8])> {
 fn open_tar_file(path: &Path) -> Result<Box<dyn Read>> {
     let file = File::open(path)
         .with_context(|| format!("Failed to open archive at: {}", path.display()))?;
-    advise_sequential(&file);
+    advise_sequential(&file).with_context(
+        || "Failed to set sequential access advice for archive file, consider diabling it with",
+    )?;
     let buf = BufReader::with_capacity(LUSTRE_OPTIMAL_BUFFER, file);
     let format = TarFormat::from_path(path).unwrap_or(TarFormat::Tar);
 
@@ -76,19 +78,20 @@ fn open_tar_file(path: &Path) -> Result<Box<dyn Read>> {
 
 /// Hint the OS to prefetch aggressively for sequential access.
 #[cfg(target_os = "linux")]
-fn advise_sequential(file: &File) {
+fn advise_sequential(file: &File) -> Result<()> {
     use std::os::unix::io::AsRawFd;
     let ret = unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL) };
-    if ret != 0 {
-        eprintln!(
-            "posix_fadvise failed: {}",
-            std::io::Error::from_raw_os_error(ret)
-        );
+    match ret {
+        0 => Ok(()),
+        e => Err(anyhow::anyhow!("posix_fadvise failed with error code: {e}")),
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn advise_sequential(_file: &File) {}
+fn advise_sequential(_file: &File) -> Result<()> {
+    // No-op on unsupported platforms.
+    Ok(())
+}
 
 /// Read entry data with a bounded preallocation.
 // TODO: benchmark the +64 byte slack; it exists to avoid a realloc when
