@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -51,13 +52,10 @@ pub struct PySample {
 #[pymethods]
 impl PySample {
     #[getter]
-    fn fields(&self) -> Vec<PyField> {
-        self.fields
-            .iter()
-            .map(|f| PyField {
-                suffix: f.suffix.clone(),
-                data: f.data.clone(),
-            })
+    fn fields(&mut self) -> Vec<PyField> {
+        std::mem::take(&mut self.fields)
+            .into_iter()
+            .map(PyField::from)
             .collect()
     }
 
@@ -135,7 +133,7 @@ impl PySampleWriter {
             .ok_or_else(|| PyRuntimeError::new_err("writer already finished"))?;
         let s = sample::Sample {
             key: sample.key.clone(),
-            url: sample.url.as_str().into(),
+            url: Arc::from(sample.url.as_str()),
             fields: sample
                 .fields
                 .iter()

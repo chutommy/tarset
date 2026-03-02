@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufReader, Read};
-use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -10,6 +9,9 @@ use anyhow::{Context, Result};
 use crate::TarFormat;
 use crate::consts::LUSTRE_OPTIMAL_BUFFER;
 use crate::sample::{Field, Sample};
+
+/// Maximum tar entry size we will preallocate for (2 GiB).
+const MAX_ENTRY_SIZE: usize = 2 * 1024 * 1024 * 1024;
 
 /// Split a tar entry path into `(key, suffix)` at the first `.` in the basename.
 ///
@@ -64,14 +66,40 @@ fn open_tar_file(path: &Path) -> Result<Box<dyn Read>> {
 }
 
 /// Hint the OS to prefetch aggressively for sequential access.
+#[cfg(target_os = "linux")]
 fn advise_sequential(file: &File) {
-    unsafe {
-        libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+    use std::os::unix::io::AsRawFd;
+    let ret = unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL) };
+    if ret != 0 {
+        eprintln!(
+            "posix_fadvise failed: {}",
+            std::io::Error::from_raw_os_error(ret)
+        );
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn advise_sequential(_file: &File) {}
+
+/// Read entry data with a bounded preallocation.
+fn read_entry_data(entry: &mut impl Read, size: usize) -> Result<Vec<u8>> {
+    let cap = size.min(MAX_ENTRY_SIZE).saturating_add(64);
+    let mut data = Vec::new();
+    data.try_reserve(cap)
+        .map_err(|_| anyhow::anyhow!("tar entry too large to allocate: {size} bytes"))?;
+    data.reserve(cap);
+    entry.read_to_end(&mut data)?;
+    Ok(data)
 }
 
 /// Streaming iterator that yields [`Sample`]s from a tar archive.
 /// Consecutive tar entries sharing the same key are grouped into a single sample.
+///
+/// # Field ordering invariant
+///
+/// `_archive` **must** be declared after `entries` so that `entries` is dropped
+/// first (Rust drops fields in declaration order). The `entries` borrow from the
+/// heap-allocated archive, so reversing this order would be use-after-free.
 pub struct SampleReader {
     entries: tar::Entries<'static, Box<dyn Read>>,
     _archive: Box<tar::Archive<Box<dyn Read>>>,
@@ -89,9 +117,21 @@ impl SampleReader {
 
         // SAFETY: archive is heap-pinned and outlives entries via _archive field.
         let archive_ptr = Box::into_raw(archive);
-        let entries = unsafe { (*archive_ptr).entries()? };
-        let entries = unsafe { std::mem::transmute(entries) };
-        let archive = unsafe { Box::from_raw(archive_ptr) };
+        let entries_result = unsafe { (*archive_ptr).entries() };
+        let (entries, archive) = match entries_result {
+            Ok(entries) => {
+                let entries = unsafe { std::mem::transmute(entries) };
+                let archive = unsafe { Box::from_raw(archive_ptr) };
+                (entries, archive)
+            }
+            Err(e) => {
+                // Reconstruct Box to avoid leaking archive and its file handle.
+                unsafe {
+                    let _ = Box::from_raw(archive_ptr);
+                }
+                return Err(e.into());
+            }
+        };
 
         Ok(Self {
             entries,
@@ -203,11 +243,11 @@ impl Iterator for SampleReader {
                 self.current_key = new_key.unwrap();
 
                 if let Some(suffix_str) = suffix_str {
-                    let mut data = Vec::with_capacity(size + 64);
                     let mut entry = entry;
-                    if let Err(e) = entry.read_to_end(&mut data) {
-                        return Some(Err(e.into()));
-                    }
+                    let data = match read_entry_data(&mut entry, size) {
+                        Ok(d) => d,
+                        Err(e) => return Some(Err(e)),
+                    };
                     self.current_sample.push(Field {
                         suffix: suffix_str,
                         data,
@@ -221,11 +261,11 @@ impl Iterator for SampleReader {
             }
 
             if let Some(suffix_str) = suffix_str {
-                let mut data = Vec::with_capacity(size + 64);
                 let mut entry = entry;
-                if let Err(e) = entry.read_to_end(&mut data) {
-                    return Some(Err(e.into()));
-                }
+                let data = match read_entry_data(&mut entry, size) {
+                    Ok(d) => d,
+                    Err(e) => return Some(Err(e)),
+                };
                 self.current_sample.push(Field {
                     suffix: suffix_str,
                     data,
