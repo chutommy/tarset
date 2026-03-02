@@ -74,6 +74,8 @@ fn resolve_source(source: &str) -> Result<Vec<PathBuf>> {
 }
 
 /// Parallelizes resolution when there are enough sources to justify the overhead.
+// TODO: benchmark the threshold; rayon's par_iter has low overhead so a lower
+// value (e.g. 2-4) might win when sources are directories requiring stat/walk.
 const PAR_THRESHOLD: usize = 8;
 
 /// Resolve multiple source strings into deduplicated, sorted absolute paths.
@@ -92,6 +94,7 @@ pub fn resolve_sources(sources: &[&str]) -> Result<Vec<PathBuf>> {
         }
     }
 
+    // TODO: benchmark sort+dedup vs HashSet collection for large source lists.
     resolved.sort_unstable();
     resolved.dedup();
     Ok(resolved)

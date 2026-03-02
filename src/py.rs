@@ -20,6 +20,8 @@ pub struct PyField {
 
 #[pymethods]
 impl PyField {
+    // TODO: benchmark PyBytes::new (copies data) vs holding an Arc<[u8]> and
+    // using PyBytes::new_with or a buffer-protocol object to avoid the copy.
     #[getter]
     fn data<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
         PyBytes::new(py, &self.data)
@@ -51,6 +53,9 @@ pub struct PySample {
 
 #[pymethods]
 impl PySample {
+    // TODO: benchmark eager Vec<PyField> conversion vs lazy iteration.
+    // Currently calling .fields drains all fields at once; if users typically
+    // access only one or two fields, a lazy approach could save allocations.
     #[getter]
     fn fields(&mut self) -> Vec<PyField> {
         std::mem::take(&mut self.fields)

@@ -11,6 +11,8 @@ use crate::consts::LUSTRE_OPTIMAL_BUFFER;
 use crate::sample::{Field, Sample};
 
 /// Maximum tar entry size we will preallocate for (2 GiB).
+// TODO: benchmark whether a lower cap (e.g. 256 MiB) with grow-on-read is
+// better for memory pressure when most entries are much smaller.
 const MAX_ENTRY_SIZE: usize = 2 * 1024 * 1024 * 1024;
 
 /// Split a tar entry path into `(key, suffix)` at the first `.` in the basename.
@@ -34,6 +36,11 @@ fn split_key_suffix(path: &[u8]) -> Option<(&[u8], &[u8])> {
 /// Open a tar archive with decompression based on [`TarFormat`].
 ///
 /// See [`SampleWriter`](crate::writer::SampleWriter) for the corresponding writer.
+///
+/// TODO: compressed formats are double-buffered (BufReader around file, then
+/// BufReader around decompressor). Benchmark whether dropping the outer buffer
+/// for compressed formats (the decompressor already reads in blocks) or using a
+/// smaller inner buffer improves throughput or memory usage.
 fn open_tar_file(path: &Path) -> Result<Box<dyn Read>> {
     let file = File::open(path)
         .with_context(|| format!("Failed to open archive at: {}", path.display()))?;
@@ -57,6 +64,8 @@ fn open_tar_file(path: &Path) -> Result<Box<dyn Read>> {
         )),
         TarFormat::TarZst => {
             let mut decoder = zstd::stream::Decoder::new(buf)?;
+            // TODO: benchmark window_log_max values (27..31). Higher values
+            // allow larger zstd windows but use more memory per decoder.
             decoder.window_log_max(31)?;
             Box::new(BufReader::with_capacity(LUSTRE_OPTIMAL_BUFFER, decoder))
         }
@@ -82,12 +91,14 @@ fn advise_sequential(file: &File) {
 fn advise_sequential(_file: &File) {}
 
 /// Read entry data with a bounded preallocation.
+// TODO: benchmark the +64 byte slack; it exists to avoid a realloc when
+// read_to_end appends a final zero-length probe read. Profile whether this
+// actually prevents a realloc in practice or if it can be dropped.
 fn read_entry_data(entry: &mut impl Read, size: usize) -> Result<Vec<u8>> {
     let cap = size.min(MAX_ENTRY_SIZE).saturating_add(64);
     let mut data = Vec::new();
     data.try_reserve(cap)
         .map_err(|_| anyhow::anyhow!("tar entry too large to allocate: {size} bytes"))?;
-    data.reserve(cap);
     entry.read_to_end(&mut data)?;
     Ok(data)
 }
@@ -106,6 +117,8 @@ pub struct SampleReader {
     url: Arc<str>,
     current_key: Vec<u8>,
     current_sample: Vec<Field>,
+    // TODO: benchmark HashSet vs a small Vec for suffix filtering; typical
+    // workloads have very few suffixes (<10), where linear scan may beat hashing.
     suffixes: Option<HashSet<String>>,
     done: bool,
 }
@@ -198,7 +211,13 @@ impl Iterator for SampleReader {
                 continue;
             }
 
-            let size = entry.size() as usize;
+            let entry_size = entry.size();
+            if entry_size > usize::MAX as u64 {
+                return Some(Err(anyhow::anyhow!(
+                    "tar entry too large for this platform: {entry_size} bytes"
+                )));
+            }
+            let size = entry_size as usize;
 
             // Parse path and decide what to do before consuming the entry.
             let analysis = {
