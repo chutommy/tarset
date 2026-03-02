@@ -49,6 +49,10 @@ impl_finishable!(
 /// Compressed formats get a `BufWriter` between file and compressor so that
 /// compressed output is flushed to disk in large blocks. Plain `.tar` skips
 /// this because the caller already provides an outer `BufWriter`.
+///
+/// TODO: the caller wraps this in another LUSTRE_OPTIMAL_BUFFER-sized BufWriter,
+/// so compressed formats are double-buffered (~32 MiB). Benchmark whether
+/// removing the inner buffer (or reducing its size) hurts throughput.
 fn open_tar_file(path: &Path) -> Result<Box<dyn FinishableWrite + 'static>> {
     let file = File::create(path)
         .with_context(|| format!("Failed to create archive at: {}", path.display()))?;
@@ -56,14 +60,17 @@ fn open_tar_file(path: &Path) -> Result<Box<dyn FinishableWrite + 'static>> {
 
     let writer: Box<dyn FinishableWrite> = match format {
         TarFormat::Tar => Box::new(file),
+        // TODO: benchmark compression levels vs throughput for each codec.
+        // Current values are reasonable defaults but may not be optimal for
+        // the typical tar-of-many-small-blobs workload.
         TarFormat::TarGz | TarFormat::Tgz => {
             let buf = BufWriter::with_capacity(LUSTRE_OPTIMAL_BUFFER, file);
-            let default = flate2::Compression::default();
+            let default = flate2::Compression::default(); // level 6
             Box::new(flate2::write::GzEncoder::new(buf, default))
         }
         TarFormat::TarBz2 => {
             let buf = BufWriter::with_capacity(LUSTRE_OPTIMAL_BUFFER, file);
-            let default = bzip2::Compression::default();
+            let default = bzip2::Compression::default(); // level 6
             Box::new(bzip2::write::BzEncoder::new(buf, default))
         }
         TarFormat::TarXz => {
@@ -94,7 +101,17 @@ impl SampleWriter {
     }
 
     /// Write all fields of a sample as tar entries at `{key}.{suffix}`.
+    ///
+    /// The key's basename must not contain `.`; the reader splits at the first
+    /// `.` in the basename, so a dot in the key would corrupt the round-trip.
     pub fn write_sample(&mut self, sample: &Sample) -> Result<()> {
+        let basename_start = sample.key.rfind('/').map_or(0, |i| i + 1);
+        anyhow::ensure!(
+            !sample.key[basename_start..].contains('.'),
+            "sample key basename must not contain '.': {:?}",
+            sample.key,
+        );
+
         for field in &sample.fields {
             let path = format!("{}.{}", sample.key, field.suffix);
             let mut header = tar::Header::new_gnu();
