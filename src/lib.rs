@@ -12,7 +12,7 @@ pub use sample::{Field, Sample};
 pub use writer::SampleWriter;
 
 #[pyo3::pymodule]
-mod tarset {
+mod tarr {
     use super::py;
 
     #[pymodule_export]

@@ -1,5 +1,5 @@
 [project]
-name = "tarset"
+name = "tarr"
 version = "0.1.0"
 description = "High-performance tar utility for Python."
 readme = "README.md"
