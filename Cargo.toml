@@ -1,10 +1,10 @@
 [package]
-name = "tarset"
+name = "tarr"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "tarset"
+name = "tarr"
 crate-type = ["cdylib"]
 
 [features]
