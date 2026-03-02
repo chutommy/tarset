@@ -4,8 +4,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::LUSTRE_OPTIMAL_BUFFER;
 use crate::TarFormat;
+use crate::consts::LUSTRE_OPTIMAL_BUFFER;
 use crate::sample::Sample;
 
 type Buf = BufWriter<File>;

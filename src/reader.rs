@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
-use crate::LUSTRE_OPTIMAL_BUFFER;
 use crate::TarFormat;
+use crate::consts::LUSTRE_OPTIMAL_BUFFER;
 use crate::sample::{Field, Sample};
 
 /// Split a tar entry path into `(key, suffix)` at the first `.` in the basename.
