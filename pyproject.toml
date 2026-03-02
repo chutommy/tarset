@@ -1,6 +1,7 @@
 [project]
 name = "tarr"
 version = "0.1.0"
+license = "Apache-2.0"
 description = "High-performance tar utility for Python."
 readme = "README.md"
 requires-python = ">=3.9"
