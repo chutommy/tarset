@@ -400,24 +400,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tapeset"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bzip2",
- "flate2",
- "glob",
- "libc",
- "memchr",
- "pyo3",
- "rayon",
- "tar",
- "walkdir",
- "xz2",
- "zstd",
-]
-
-[[package]]
 name = "tar"
 version = "0.4.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -433,6 +415,24 @@ name = "target-lexicon"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
+
+[[package]]
+name = "tarset"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bzip2",
+ "flate2",
+ "glob",
+ "libc",
+ "memchr",
+ "pyo3",
+ "rayon",
+ "tar",
+ "walkdir",
+ "xz2",
+ "zstd",
+]
 
 [[package]]
 name = "unicode-ident"

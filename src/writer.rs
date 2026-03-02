@@ -15,6 +15,12 @@ trait FinishableWrite: Write {
     fn finish(self: Box<Self>) -> io::Result<()>;
 }
 
+impl FinishableWrite for File {
+    fn finish(mut self: Box<Self>) -> io::Result<()> {
+        self.flush()
+    }
+}
+
 impl FinishableWrite for Buf {
     fn finish(mut self: Box<Self>) -> io::Result<()> {
         self.flush()
@@ -38,25 +44,36 @@ impl_finishable!(
     zstd::stream::Encoder<'static, Buf>,
 );
 
-/// Create a compressed writer based on [`TarFormat`].
+/// Create a writer based on [`TarFormat`].
+///
+/// Compressed formats get a `BufWriter` between file and compressor so that
+/// compressed output is flushed to disk in large blocks. Plain `.tar` skips
+/// this because the caller already provides an outer `BufWriter`.
 fn open_tar_file(path: &Path) -> Result<Box<dyn FinishableWrite + 'static>> {
     let file = File::create(path)
         .with_context(|| format!("Failed to create archive at: {}", path.display()))?;
-    let buf = BufWriter::with_capacity(LUSTRE_OPTIMAL_BUFFER, file);
     let format = TarFormat::from_path(path).unwrap_or(TarFormat::Tar);
 
     let writer: Box<dyn FinishableWrite> = match format {
-        TarFormat::Tar => Box::new(buf),
-        TarFormat::TarGz | TarFormat::Tgz => Box::new(flate2::write::GzEncoder::new(
-            buf,
-            flate2::Compression::default(),
-        )),
-        TarFormat::TarBz2 => Box::new(bzip2::write::BzEncoder::new(
-            buf,
-            bzip2::Compression::default(),
-        )),
-        TarFormat::TarXz => Box::new(xz2::write::XzEncoder::new(buf, 6)),
-        TarFormat::TarZst => Box::new(zstd::stream::Encoder::new(buf, 3)?),
+        TarFormat::Tar => Box::new(file),
+        TarFormat::TarGz | TarFormat::Tgz => {
+            let buf = BufWriter::with_capacity(LUSTRE_OPTIMAL_BUFFER, file);
+            let default = flate2::Compression::default();
+            Box::new(flate2::write::GzEncoder::new(buf, default))
+        }
+        TarFormat::TarBz2 => {
+            let buf = BufWriter::with_capacity(LUSTRE_OPTIMAL_BUFFER, file);
+            let default = bzip2::Compression::default();
+            Box::new(bzip2::write::BzEncoder::new(buf, default))
+        }
+        TarFormat::TarXz => {
+            let buf = BufWriter::with_capacity(LUSTRE_OPTIMAL_BUFFER, file);
+            Box::new(xz2::write::XzEncoder::new(buf, 6))
+        }
+        TarFormat::TarZst => {
+            let buf = BufWriter::with_capacity(LUSTRE_OPTIMAL_BUFFER, file);
+            Box::new(zstd::stream::Encoder::new(buf, 3)?)
+        }
     };
 
     Ok(writer)
@@ -93,7 +110,7 @@ impl SampleWriter {
     pub fn finish(self) -> Result<()> {
         let mut buf = self.builder.into_inner()?;
         buf.flush()?;
-        let (writer, _) = buf.into_parts();
+        let writer = buf.into_inner().map_err(|e| e.into_error())?;
         writer.finish()?;
         Ok(())
     }
